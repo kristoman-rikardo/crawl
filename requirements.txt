@@ -1,4 +1,4 @@
 fastapi
 uvicorn[standard]
-crawl4ai
-playwright
+httpx
+beautifulsoup4
