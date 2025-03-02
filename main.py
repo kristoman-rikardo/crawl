@@ -1,22 +1,18 @@
-import asyncio
 from fastapi import FastAPI, Query
-from crawl4ai import AsyncWebCrawler
-from playwright.async_api import async_playwright
+import httpx
+from bs4 import BeautifulSoup
 
 app = FastAPI()
 
-# Automatisk installasjon av Playwright-browsere
-async def install_playwright():
-    async with async_playwright() as p:
-        await p.chromium.launch()
-
-@app.on_event("startup")
-async def startup_event():
-    await install_playwright()
-
 @app.get("/crawl")
 async def crawl(url: str = Query(..., title="URL to scrape")):
-    """Crawls the given URL and returns extracted content."""
-    async with AsyncWebCrawler() as crawler:
-        result = await crawler.arun(url=url)
-        return {"content": result.markdown}
+    """Crawls the given URL using httpx and BeautifulSoup."""
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+    
+    if response.status_code != 200:
+        return {"error": f"Failed to fetch URL, status code {response.status_code}"}
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    return {"content": soup.get_text()[:2000]}  # Begrens til 2000 tegn for å unngå for store svar
