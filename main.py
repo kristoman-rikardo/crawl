@@ -2,24 +2,22 @@ import asyncio
 from fastapi import FastAPI, Query
 from crawl4ai import AsyncWebCrawler
 from playwright.async_api import async_playwright
-from cachetools import LRUCache
+from cachetools import LRUCache  # Hvis du også ønsker caching
 
 app = FastAPI()
 
-# Globale variabler for delt Playwright-instans, browser, semafor og cache
+# Globale variabler for delt Playwright-instans, delt browser og semafor for samtidighet
 playwright_instance = None
 browser = None
 semaphore = None
-cache = LRUCache(maxsize=50)  # Cache for de 50 mest brukte URL-ene
+cache = LRUCache(maxsize=50)  # Valgfritt, for caching av de 50 mest brukte URL-ene
 
 @app.on_event("startup")
 async def startup_event():
     global playwright_instance, browser, semaphore
-    # Start Playwright og lanser browseren kun én gang
     playwright_instance = await async_playwright().start()
     browser = await playwright_instance.chromium.launch(headless=True, args=["--no-sandbox"])
-    # Sett opp semafor for å begrense samtidige kall (f.eks. 10 samtidige kall)
-    semaphore = asyncio.Semaphore(10)
+    semaphore = asyncio.Semaphore(10)  # Begrens til for eksempel 10 samtidige kall
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -31,23 +29,24 @@ async def shutdown_event():
 
 @app.get("/crawl")
 async def crawl(url: str = Query(..., title="URL to scrape")):
-    """Scraper den oppgitte URL-en ved hjelp av en delt browser-instans, med caching og samtidighetsbegrensning."""
-    # Sjekk om URL-en allerede er cachet
+    """Scrapes the given URL using a shared browser instance with concurrency control."""
+    # Sjekk cache først (om caching er ønskelig)
     if url in cache:
         return {"content": cache[url]}
     
     async with semaphore:
+        # Opprett en ny side for dette kallet
         page = await browser.new_page()
         try:
-            # Bruk AsyncWebCrawler med den delte browseren og den nye siden
+            # Send inn den delte browser-instansen og den nye siden til AsyncWebCrawler
             async with AsyncWebCrawler(browser=browser, page=page) as crawler:
                 result = await crawler.arun(url=url)
                 content = result.markdown
         finally:
-            await page.close()  # Sørg for å lukke siden for å frigjøre ressurser
+            await page.close()
     
-    # Legg til resultatet i cachen dersom det er gyldig (ikke tomt)
+    # Legg til i cache hvis innholdet er gyldig (valgfritt)
     if content:
         cache[url] = content
-    
+
     return {"content": content}
