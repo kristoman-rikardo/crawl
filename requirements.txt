@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 crawl4ai
 playwright
+cachetools
