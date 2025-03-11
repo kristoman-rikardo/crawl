@@ -1,28 +1,19 @@
 import asyncio
 from fastapi import FastAPI, Query
 from crawl4ai import AsyncWebCrawler
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 app = FastAPI()
-
-# Oppretter en global crawler-variabel
 crawler = None
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    Kalles kun én gang når FastAPI-applikasjonen starter opp.
-    Vi oppretter én global crawler-instans og åpner den (inkl. Playwright-browser).
-    """
     global crawler
     crawler = AsyncWebCrawler()
-    await crawler.__aenter__()  # Start ressursene i crawleren
+    await crawler.__aenter__()  # Start ressursene (Playwright)
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """
-    Kalles når applikasjonen stenges (for eksempel ved stans eller deploy-oppdatering).
-    Vi lukker den globale crawler-instansen her.
-    """
     global crawler
     if crawler:
         await crawler.__aexit__(None, None, None)
@@ -31,8 +22,32 @@ async def shutdown_event():
 @app.get("/crawl")
 async def crawl(url: str = Query(..., title="URL to scrape")):
     """
-    Henter innhold fra gitt URL ved å bruke den allerede åpne crawler-instansen.
+    Forsøker å laste siden med 1,5 sek timeout.
+    Hvis tiden overskrides, prøver vi å returnere 'delvis' innhold likevel.
     """
     global crawler
-    result = await crawler.arun(url=url)
-    return {"content": result.markdown}
+    try:
+        result = await crawler.arun(
+            url=url, 
+            wait_until="domcontentloaded",
+            goto_options={"timeout": 1500}  # 1,5 sekunder
+        )
+        return {"content": result.markdown}
+    except PlaywrightTimeoutError:
+        # Siden ble ikke helt ferdig lastet før timeout
+        # Forsøk å hente ut *det som eventuelt rakk å laste*:
+        page = crawler.page  # Normalt referanse til siste brukte Playwright-side
+
+        if not page:
+            # Hvis 'page' er None, har vi ikke noe delvis innhold å hente
+            return {"error": "Timeout før siden begynte å laste."}
+
+        # Hent innholdet så langt
+        partial_html = await page.content()
+        # Evt. kjøre litt ekstra parse for markdown
+        # men 'crawler.parse_to_markdown' er vanligvis privat
+        # Her kan du bygge et eget "konverter HTML til markdown" hvis du vil
+        return {
+            "content": partial_html, 
+            "warning": "Timeout: returnerer ufullstendig innhold"
+        }
