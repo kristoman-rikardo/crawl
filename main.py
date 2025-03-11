@@ -44,7 +44,7 @@ async def crawl(url: str = Query(..., title="URL to scrape")):
     try:
         result = await crawler.arun(
             url=url,
-            wait_until="networkidle",
+            wait_until="load",
             goto_options={"timeout": 1}  # 1,5 sekunder
         )
         return {"content": result.markdown}
