@@ -1,67 +1,95 @@
 import asyncio
 from fastapi import FastAPI, Query
-from crawl4ai import AsyncWebCrawler
-from playwright.async_api import async_playwright
-from cachetools import LRUCache  # For caching
+from cachetools import LRUCache
+
+# Crawl4AI-relaterte imports
+from crawl4ai import (
+    AsyncWebCrawler,
+    BrowserConfig,
+    CrawlerRunConfig,
+    CacheMode
+)
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 app = FastAPI()
 
-# Globale variabler for delt Playwright-instans, delt browser, semafor og cache
-playwright_instance = None
-browser = None
+# Globale variabler
+crawler = None
 semaphore = None
-cache = LRUCache(maxsize=50)  # Lagrer de 50 mest brukte URL-ene
+cache = LRUCache(maxsize=50)  # Beholder 50 siste URL-resultater
 
 @app.on_event("startup")
 async def startup_event():
-    global playwright_instance, browser, semaphore
-    playwright_instance = await async_playwright().start()
-    browser = await playwright_instance.chromium.launch(headless=True, args=["--no-sandbox"])
-    semaphore = asyncio.Semaphore(10)  # Begrens til for eksempel 10 samtidige kall
+    """
+    Oppretter én global (asynkron) crawler.
+    Da slipper vi å spinne opp en ny nettleser for hver request.
+    """
+    global crawler, semaphore
+
+    # Konfigurer BrowserConfig
+    browser_conf = BrowserConfig(
+        headless=True,
+        no_sandbox=True,
+        java_script_enabled=True,
+    )
+
+    # Opprett en AsyncWebCrawler med gitt config
+    crawler = AsyncWebCrawler(config=browser_conf)
+    await crawler.__aenter__()  # Start crawleren permanent
+
+    # Tillat opptil 10 samtidige kall
+    semaphore = asyncio.Semaphore(10)
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global playwright_instance, browser
-    if browser:
-        await browser.close()
-    if playwright_instance:
-        await playwright_instance.stop()
+    """
+    Lukk crawler og rydd opp når appen stopper.
+    """
+    global crawler
+    if crawler:
+        await crawler.__aexit__(None, None, None)
+        crawler = None
 
 @app.get("/crawl")
-async def crawl(url: str = Query(..., title="URL to scrape")):
-    """Scrapes the given URL using a shared browser instance with concurrency control,
-    optimalisert med raskere sideinnlasting og blokkering av unødvendige ressurser."""
-    
-    # Sjekk cache først
+async def crawl_url(url: str = Query(..., title="URL å hente")):
+    """
+    Rask scraping av URL, returnert som Markdown.
+    Cacher resultat for å unngå gjentatt lasting av samme side.
+    """
+    # Sjekk først om vi har det i cache
     if url in cache:
         return {"content": cache[url]}
-    
+
     async with semaphore:
-        # Opprett en ny side for dette kallet
-        page = await browser.new_page()
-        
-        # Definer en funksjon for å blokkere unødvendige ressurser
-        async def block_resources(route):
-            if route.request.resource_type in ["image", "stylesheet", "font"]:
-                await route.abort()
-            else:
-                await route.continue_()
-        
+        # Bygg en run-konfig for "domcontentloaded" og maks 3 sek ventetid
+        run_conf = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,  # Henter alltid nytt innhold
+            markdown_generator=DefaultMarkdownGenerator(),
+            page_goto_kwargs={
+                "wait_until": "domcontentloaded",
+                "timeout": 3000
+            },
+            route_hook=_block_extras  # Blokker bilder/font osv.
+        )
+
         try:
-            # Sett opp route for å blokkere spesifikke ressurser
-            await page.route("**/*", block_resources)
-            # Bruk "domcontentloaded" for raskere innlasting
-            await page.goto(url, wait_until="load")
-            
-            # Bruk AsyncWebCrawler med den delte browser-instansen og den konfigurerte siden
-            async with AsyncWebCrawler(browser=browser, page=page) as crawler:
-                result = await crawler.arun(url=url)
-                content = result.markdown
-        finally:
-            await page.close()
-    
-    # Cache resultatet dersom det er gyldig
+            result = await crawler.arun(url=url, config=run_conf)
+            content = result.markdown.raw_markdown
+        except Exception as e:
+            content = f"Feil under henting av '{url}': {str(e)}"
+
+    # Lagre i cache før vi returnerer
     if content:
         cache[url] = content
 
     return {"content": content}
+
+async def _block_extras(route):
+    """
+    Blokkerer bilder, video, fonter og stylesheets for raskere innlasting.
+    """
+    req = route.request
+    if req.resource_type in ["image", "media", "font", "stylesheet"]:
+        await route.abort()
+    else:
+        await route.continue_()
