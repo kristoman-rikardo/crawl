@@ -21,7 +21,8 @@ def process_content(side_innhold: str) -> str:
         re.compile(r"\.(jpg|jpeg|png|svg|gif)", re.IGNORECASE),
         re.compile(r"<script", re.IGNORECASE),
         re.compile(r"</script>", re.IGNORECASE),
-        re.compile(r"privacy", re.IGNORECASE)
+        re.compile(r"privacy", re.IGNORECASE),
+        re.compile(r"personvern", re.IGNORECASE)
     ]
     
     # 3) Filtrer bort linjer som matcher støy
