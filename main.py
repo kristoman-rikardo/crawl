@@ -1,10 +1,19 @@
 import asyncio
 from fastapi import FastAPI, Query
 from crawl4ai import AsyncWebCrawler
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright
 
-# 1) Subklasse for blokkering av unødvendige ressurser
+# Subklasse for blokkering av unødvendige ressurser og rask nettleserstart
 class FastWebCrawler(AsyncWebCrawler):
+    async def setup_browser(self):
+        playwright = await async_playwright()
+        self._browser = await playwright.chromium.launch(
+            headless=True,
+            args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        self._context = await self._browser.new_context()
+        self._page = await self._context.new_page()
+
     async def setup_page(self):
         page = await super().setup_page()
         await page.route("**/*", self._block_non_text_resources)
@@ -16,14 +25,12 @@ class FastWebCrawler(AsyncWebCrawler):
         else:
             await route.continue_()
 
-
 app = FastAPI()
 crawler = None
 
 @app.on_event("startup")
 async def startup_event():
     global crawler
-    # 2) Bruk subklassen
     crawler = FastWebCrawler()
     await crawler.__aenter__()  # Starter ressursene (Playwright)
 
@@ -37,23 +44,11 @@ async def shutdown_event():
 @app.get("/crawl")
 async def crawl(url: str = Query(..., title="URL to scrape")):
     """
-    Forsøker å laste siden med 1,5 sek timeout.
-    Hvis tiden overskrides, prøver vi å returnere 'delvis' innhold likevel.
+    Laster siden med wait_until="domcontentloaded" uten timeout.
     """
     global crawler
-    try:
-        result = await crawler.arun(
-            url=url,
-            wait_until="domcontentloaded",
-            goto_options={"timeout": 1}  # 1,5 sekunder
-        )
-        return {"content": result.markdown}
-    except PlaywrightTimeoutError:
-        page = crawler.page  
-        if not page:
-            return {"error": "Timeout før siden begynte å laste."}
-        partial_html = await page.content()
-        return {
-            "content": partial_html,
-            "warning": "Timeout: returnerer ufullstendig innhold"
-        }
+    result = await crawler.arun(
+        url=url,
+        wait_until="domcontentloaded"
+    )
+    return {"content": result.markdown}
