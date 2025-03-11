@@ -45,7 +45,7 @@ async def crawl(url: str = Query(..., title="URL to scrape")):
         result = await crawler.arun(
             url=url,
             wait_until="domcontentloaded",
-            goto_options={"timeout": 1500}  # 1,5 sekunder
+            goto_options={"timeout": 1}  # 1,5 sekunder
         )
         return {"content": result.markdown}
     except PlaywrightTimeoutError:
