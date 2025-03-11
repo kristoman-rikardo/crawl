@@ -3,6 +3,11 @@ import re
 from fastapi import FastAPI, Query
 from crawl4ai import AsyncWebCrawler
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from cachetools import LRUCache
+
+# Opprett en LRUCache for å lagre opptil 1000 URL-resultater
+cache = LRUCache(maxsize=1000)
+cache_lock = asyncio.Lock()  # Brukes for å sikre asynkront tilgang til cache
 
 # Funksjon for postprosessering av skrapet innhold, tilsvarende JavaScript-logikken
 def process_content(side_innhold: str) -> str:
@@ -22,7 +27,8 @@ def process_content(side_innhold: str) -> str:
         re.compile(r"<script", re.IGNORECASE),
         re.compile(r"</script>", re.IGNORECASE),
         re.compile(r"privacy", re.IGNORECASE),
-        re.compile(r"personvern", re.IGNORECASE)
+        re.compile(r"personvern", re.IGNORECASE),
+        re.compile(r"google analytics", re.IGNORECASE)
     ]
     
     # 3) Filtrer bort linjer som matcher støy
@@ -83,23 +89,31 @@ async def shutdown_event():
 async def crawl(url: str = Query(..., title="URL to scrape")):
     """
     Skraper siden med wait_until="domcontentloaded", bearbeider innholdet
-    og returnerer det bearbeidede resultatet som 'productInfo'.
+    og returnerer det bearbeidede resultatet som 'productInfo'. 
+    Resultatet caches for de 1000 mest brukte URL-ene.
     """
     global crawler
+
+    # Sjekk cache for eksisterende resultat
+    async with cache_lock:
+        if url in cache:
+            return {"content": cache[url]}
+    
     try:
         result = await crawler.arun(
             url=url,
             wait_until="domcontentloaded"
         )
-        # Bearbeid det skrapede innholdet med process_content-funksjonen
         product_info = process_content(result.markdown)
-        return {"content": product_info}
     except PlaywrightTimeoutError:
-        # Hvis det oppstår en timeout, forsøker vi å hente delvis innhold
         page = crawler.page
         if not page:
             return {"error": "Timeout: Siden startet ikke å laste."}
         partial_html = await page.content()
         product_info = process_content(partial_html)
-        return {"content": product_info}
+    
+    # Lagre resultatet i cache
+    async with cache_lock:
+        cache[url] = product_info
 
+    return {"content": product_info}
