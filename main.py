@@ -2,17 +2,16 @@ import asyncio
 from fastapi import FastAPI, Query
 from cachetools import LRUCache
 
-# Crawl4AI-relaterte imports
+# Grunnleggende Crawl4AI-imports
 from crawl4ai import (
     AsyncWebCrawler,
-    BrowserConfig,
     CrawlerRunConfig,
     CacheMode
 )
-from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 app = FastAPI()
 
+# Global crawler (startes bare én gang) + semafor + en liten LRUCache
 crawler = None
 semaphore = None
 cache = LRUCache(maxsize=50)
@@ -20,30 +19,23 @@ cache = LRUCache(maxsize=50)
 @app.on_event("startup")
 async def startup_event():
     """
-    Oppretter én global (asynkron) crawler.
-    Da slipper vi å spinne opp en ny nettleser for hver request.
+    Starter én global async crawler, slik at vi
+    slipper å spinne opp ny nettleser for hver request.
     """
     global crawler, semaphore
 
-    # Prøv "launch_args" for å sende inn egne Chromium-flags.
-    # (Hvis "launch_args" ikke virker, prøv "playwright_browser_args")
-    browser_conf = BrowserConfig(
-        headless=True,
-        java_script_enabled=True,
-        launch_args=["--no-sandbox"]
-    )
+    # Ingen spesielle BrowserConfig-argumenter som kan krasje.
+    crawler = AsyncWebCrawler()
+    await crawler.__aenter__()  # 'Åpner' crawleren permanent
 
-    # Opprett en AsyncWebCrawler med gitt config
-    crawler = AsyncWebCrawler(config=browser_conf)
-    await crawler.__aenter__()  # Start crawleren permanent
-
-    # Begrens antall samtidige kall
+    # Tillat for eksempel 10 samtidige kall
     semaphore = asyncio.Semaphore(10)
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """
-    Lukk crawler og rydd opp når appen stopper.
+    Rydder opp når serveren stopper.
+    Lukker crawleren hvis den kjører.
     """
     global crawler
     if crawler:
@@ -51,45 +43,33 @@ async def shutdown_event():
         crawler = None
 
 @app.get("/crawl")
-async def crawl_url(url: str = Query(..., title="URL å hente")):
+async def crawl_url(url: str = Query(..., title="URL to scrape")):
     """
-    Rask scraping av URL, returnert som Markdown.
-    Cacher resultat for å unngå gjentatt lasting av samme side.
+    Henter innhold fra en URL, konverterer til Markdown og returnerer.
+    Holder én global crawler for rask oppstart.
     """
-    # Sjekk først om vi har det i cache
+    # Hvis vi har innholdet i cache, returnér raskt
     if url in cache:
         return {"content": cache[url]}
 
     async with semaphore:
-        # Bygg en run-konfig for "domcontentloaded" og maks 3 sek ventetid
-        run_conf = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,  # Henter alltid nytt
-            markdown_generator=DefaultMarkdownGenerator(),
+        # Bygg en run-konfig som:
+        # - Bypasser eventuell http-cache (frisk henting hver gang)
+        # - Kun venter til "domcontentloaded" og har timeout på 3 sek
+        config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
             page_goto_kwargs={
                 "wait_until": "domcontentloaded",
                 "timeout": 3000
             },
-            route_hook=_block_extras  # Blokker bilder/font osv.
         )
-
         try:
-            result = await crawler.arun(url=url, config=run_conf)
+            result = await crawler.arun(url=url, config=config)
+            # Hent ut ren Markdown
             content = result.markdown.raw_markdown
         except Exception as e:
             content = f"Feil under henting av '{url}': {str(e)}"
 
-    # Lagre i cache
-    if content:
-        cache[url] = content
-
+    # Legg til i minnecache før vi returnerer
+    cache[url] = content
     return {"content": content}
-
-async def _block_extras(route):
-    """
-    Blokkerer bilder, video, fonter og stylesheets for raskere innlasting.
-    """
-    req = route.request
-    if req.resource_type in ["image", "media", "font", "stylesheet"]:
-        await route.abort()
-    else:
-        await route.continue_()
