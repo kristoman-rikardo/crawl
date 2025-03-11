@@ -51,7 +51,7 @@ async def crawl(url: str = Query(..., title="URL to scrape")):
             # Sett opp route for å blokkere spesifikke ressurser
             await page.route("**/*", block_resources)
             # Bruk "domcontentloaded" for raskere innlasting
-            await page.goto(url, wait_until="domcontentloaded")
+            await page.goto(url, wait_until="load")
             
             # Bruk AsyncWebCrawler med den delte browser-instansen og den konfigurerte siden
             async with AsyncWebCrawler(browser=browser, page=page) as crawler:
