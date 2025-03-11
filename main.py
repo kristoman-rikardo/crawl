@@ -2,74 +2,107 @@ import asyncio
 from fastapi import FastAPI, Query
 from cachetools import LRUCache
 
-# Grunnleggende Crawl4AI-imports
+# Crawl4AI:
 from crawl4ai import (
     AsyncWebCrawler,
+    BrowserConfig,
     CrawlerRunConfig,
     CacheMode
 )
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 app = FastAPI()
 
-# Global crawler (startes bare én gang) + semafor + en liten LRUCache
+# Globale variabler
 crawler = None
 semaphore = None
-cache = LRUCache(maxsize=50)
+cache = LRUCache(maxsize=50)  # Lagrer inntil 50 sider i minnet
 
 @app.on_event("startup")
-async def startup_event():
+async def startup():
     """
-    Starter én global async crawler, slik at vi
-    slipper å spinne opp ny nettleser for hver request.
+    Starter én global nettleser (via AsyncWebCrawler) ved oppstart,
+    slik at vi unngår å spinne opp nye browser-instanser på hver forespørsel.
     """
     global crawler, semaphore
 
-    # Ingen spesielle BrowserConfig-argumenter som kan krasje.
-    crawler = AsyncWebCrawler()
-    await crawler.__aenter__()  # 'Åpner' crawleren permanent
+    # Bygg en BrowserConfig som aktiverer headless modus,
+    # kjører JavaScript, og setter f.eks. --no-sandbox-flagg til Chromium.
+    browser_conf = BrowserConfig(
+        headless=True,
+        java_script_enabled=True,
+        launch_options={
+            "args": ["--no-sandbox"]
+        }
+    )
 
-    # Tillat for eksempel 10 samtidige kall
+    # Opprett og "åpne" crawleren permanent
+    crawler = AsyncWebCrawler(config=browser_conf)
+    await crawler.__aenter__()
+
+    # Begrens antall samtidige requests
     semaphore = asyncio.Semaphore(10)
 
 @app.on_event("shutdown")
-async def shutdown_event():
+async def shutdown():
     """
-    Rydder opp når serveren stopper.
-    Lukker crawleren hvis den kjører.
+    Rydder opp ved server-stopp; lukker den globale crawleren hvis den kjører.
     """
     global crawler
     if crawler:
         await crawler.__aexit__(None, None, None)
         crawler = None
 
+@app.get("/")
+def root():
+    """
+    Et enkelt 'helse'-endepunkt.
+    """
+    return {"status": "ok"}
+
 @app.get("/crawl")
 async def crawl_url(url: str = Query(..., title="URL to scrape")):
     """
-    Henter innhold fra en URL, konverterer til Markdown og returnerer.
-    Holder én global crawler for rask oppstart.
+    Rask scraping av gitt URL, returnert som Markdown.
+    Bruker en global crawler for minimalt overhead.
     """
-    # Hvis vi har innholdet i cache, returnér raskt
+    # Sjekk om vi allerede har innholdet i vår minne-cache
     if url in cache:
         return {"content": cache[url]}
 
+    # Begrens samtidighet via semafor
     async with semaphore:
-        # Bygg en run-konfig som:
-        # - Bypasser eventuell http-cache (frisk henting hver gang)
-        # - Kun venter til "domcontentloaded" og har timeout på 3 sek
-        config = CrawlerRunConfig(
+        # Konfig som bare venter til DOMContentLoaded, har maks 3 sek timeout
+        # og blokkerer unødvendige ressurser (bilder, fonter osv.)
+        run_conf = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,
+            markdown_generator=DefaultMarkdownGenerator(),
             page_goto_kwargs={
                 "wait_until": "domcontentloaded",
                 "timeout": 3000
             },
+            route_hook=_block_extras
         )
+
         try:
-            result = await crawler.arun(url=url, config=config)
-            # Hent ut ren Markdown
+            # Utfør selve crawlingen
+            result = await crawler.arun(url=url, config=run_conf)
             content = result.markdown.raw_markdown
         except Exception as e:
+            # Returner feilmelding hvis noe går galt
             content = f"Feil under henting av '{url}': {str(e)}"
 
-    # Legg til i minnecache før vi returnerer
+    # Legg resultat i cache for rask gjenbruk
     cache[url] = content
     return {"content": content}
+
+async def _block_extras(route):
+    """
+    Blokkerer typer vi ikke trenger: bilder, fonter, stylesheets, video.
+    Dette reduserer lastingstid betydelig.
+    """
+    req = route.request
+    if req.resource_type in ["image", "media", "font", "stylesheet"]:
+        await route.abort()
+    else:
+        await route.continue_()
