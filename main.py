@@ -13,10 +13,9 @@ from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 app = FastAPI()
 
-# Globale variabler
 crawler = None
 semaphore = None
-cache = LRUCache(maxsize=50)  # Beholder 50 siste URL-resultater
+cache = LRUCache(maxsize=50)
 
 @app.on_event("startup")
 async def startup_event():
@@ -26,15 +25,12 @@ async def startup_event():
     """
     global crawler, semaphore
 
-    # Konfigurer BrowserConfig med launch_options for å sette f.eks. --no-sandbox
-    # (siden 'no_sandbox' ikke finnes som egen parameter)
+    # Prøv "launch_args" for å sende inn egne Chromium-flags.
+    # (Hvis "launch_args" ikke virker, prøv "playwright_browser_args")
     browser_conf = BrowserConfig(
         headless=True,
         java_script_enabled=True,
-        # Overstyr Playwright launch-innstillinger
-        launch_options={
-            "args": ["--no-sandbox"]
-        }
+        launch_args=["--no-sandbox"]
     )
 
     # Opprett en AsyncWebCrawler med gitt config
@@ -67,7 +63,7 @@ async def crawl_url(url: str = Query(..., title="URL å hente")):
     async with semaphore:
         # Bygg en run-konfig for "domcontentloaded" og maks 3 sek ventetid
         run_conf = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,  # Henter alltid nytt innhold
+            cache_mode=CacheMode.BYPASS,  # Henter alltid nytt
             markdown_generator=DefaultMarkdownGenerator(),
             page_goto_kwargs={
                 "wait_until": "domcontentloaded",
@@ -82,12 +78,11 @@ async def crawl_url(url: str = Query(..., title="URL å hente")):
         except Exception as e:
             content = f"Feil under henting av '{url}': {str(e)}"
 
-    # Lagre i cache før vi returnerer
+    # Lagre i cache
     if content:
         cache[url] = content
 
     return {"content": content}
-
 
 async def _block_extras(route):
     """
