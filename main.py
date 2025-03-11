@@ -26,18 +26,22 @@ async def startup_event():
     """
     global crawler, semaphore
 
-    # Konfigurer BrowserConfig
+    # Konfigurer BrowserConfig med launch_options for å sette f.eks. --no-sandbox
+    # (siden 'no_sandbox' ikke finnes som egen parameter)
     browser_conf = BrowserConfig(
         headless=True,
-        no_sandbox=True,
         java_script_enabled=True,
+        # Overstyr Playwright launch-innstillinger
+        launch_options={
+            "args": ["--no-sandbox"]
+        }
     )
 
     # Opprett en AsyncWebCrawler med gitt config
     crawler = AsyncWebCrawler(config=browser_conf)
     await crawler.__aenter__()  # Start crawleren permanent
 
-    # Tillat opptil 10 samtidige kall
+    # Begrens antall samtidige kall
     semaphore = asyncio.Semaphore(10)
 
 @app.on_event("shutdown")
@@ -83,6 +87,7 @@ async def crawl_url(url: str = Query(..., title="URL å hente")):
         cache[url] = content
 
     return {"content": content}
+
 
 async def _block_extras(route):
     """
