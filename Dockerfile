@@ -7,6 +7,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Installer Chrome/Chromium explicitly
+RUN playwright install chromium
+
 # Kopier resten av koden
 COPY . .
 
